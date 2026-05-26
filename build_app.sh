@@ -68,13 +68,31 @@ PLIST
 #    stays in the bundle's app slot and its NSStatusItem never appears. Running
 #    it detached lets it register fresh as a GUI app, exactly like a Terminal
 #    launch, so the menu-bar icon shows reliably.
-cat > "$APP/Contents/MacOS/TokenSpendie" <<LAUNCHER
+# Python is discovered at RUNTIME (not baked in) so the bundle is portable
+# across machines. Requires a framework/GUI python with rumps + Pillow.
+cat > "$APP/Contents/MacOS/TokenSpendie" <<'LAUNCHER'
 #!/bin/bash
-mkdir -p "\$HOME/.config/token_spendie"
+mkdir -p "$HOME/.config/token_spendie"
+LOG="$HOME/.config/token_spendie/agent.log"
 pkill -f "token_spendie.py" 2>/dev/null || true
-HERE="\$(cd "\$(dirname "\$0")/../Resources" && pwd)"
-nohup "$PY" "\$HERE/token_spendie.py" \\
-    >> "\$HOME/.config/token_spendie/agent.log" 2>&1 &
+HERE="$(cd "$(dirname "$0")/../Resources" && pwd)"
+
+# Find a framework/GUI python that can draw a menu-bar item AND has rumps.
+PY=""
+for c in \
+    /opt/anaconda3/python.app/Contents/MacOS/python \
+    /Library/Frameworks/Python.framework/Versions/Current/bin/python3 \
+    /opt/homebrew/bin/python3 \
+    /usr/local/bin/python3 \
+    "$(command -v python3)"; do
+    if [ -x "$c" ] && "$c" -c "import rumps" 2>/dev/null; then PY="$c"; break; fi
+done
+if [ -z "$PY" ]; then
+    osascript -e 'display alert "Token Spendie" message "ไม่พบ Python ที่มี rumps\n\nรัน: pip3 install rumps Pillow\nหรือ build จาก source: ./build_app.sh"'
+    exit 1
+fi
+
+nohup "$PY" "$HERE/token_spendie.py" >> "$LOG" 2>&1 &
 disown
 LAUNCHER
 chmod +x "$APP/Contents/MacOS/TokenSpendie"
