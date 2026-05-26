@@ -78,8 +78,17 @@ detached python register เป็น `python.app` เอง LSUIElement ใน 
   (back out จาก $22.26 ตัวอย่าง /usage) → รวม $23.98 vs จริง $23.95
 - token ที่แสดง = total throughput (รวม cache); cost = weighted ตาม pricing
 
-### Codex / Gemini
-- ยังเป็น log estimate (Codex fresh tokens = `total - cached_input`, Gemini นับ requests)
+### Codex / Gemini — ทำไมไม่ใช้ API (สำรวจแล้ว 2026-05-26)
+- **Gemini ❌** — auth `~/.gemini/oauth_creds.json` (Google OAuth personal). refresh ได้ด้วย
+  public gemini-cli client creds (token หมดบ่อยเพราะ CLI ไม่ได้รัน). แต่ `cloudcode-pa.googleapis.com
+  /v1internal:loadCodeAssist` คืนแค่ **tier** (`currentTier`/`allowedTiers`/`paidTier`) — **ไม่มี
+  usage count/quota/remaining**. tier ผู้ใช้ = "standard-tier / Unlimited" → limit 1000/วันอาจไม่ใช้ด้วยซ้ำ.
+  สรุป: Google ไม่เปิด endpoint usage → คง log counting
+- **Codex ⚠️** — auth `~/.codex/auth.json` (ChatGPT token + account_id). rate_limits (primary 5h/
+  secondary weekly) อยู่ใน ChatGPT backend `chatgpt.com/backend-api/codex/responses` (undocumented,
+  SSE, ต้องใส่ chatgpt-account-id/originator headers). probe แล้ว **timeout** → เปราะ ไม่คุ้มทำ
+- สรุป: มีแต่ Anthropic ที่คืน usage% ผ่าน header สะอาด → Codex/Gemini คง log estimate
+  (Codex fresh tokens = `total - cached_input`, Gemini นับ requests)
 
 ## ⏳ ค้าง / ยังไม่เสร็จ
 
