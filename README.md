@@ -66,6 +66,30 @@ open "Token Spendie.app"
 | `run.sh` | รันแบบ dev |
 | `requirements.txt` | `rumps`, `Pillow` |
 
+## How it works (technical notes)
+
+การแพ็ก rumps app ให้ launch ผ่าน `.app` bundle แล้ว menu-bar icon โผล่จริง เจอกับดัก 4 ข้อ —
+`build_app.sh` + `token_spendie.py` แก้ไว้ให้แล้วทั้งหมด:
+
+1. **TCC บล็อก `~/Documents`** — app ที่ launch ผ่าน LaunchServices (`open`) อ่านไฟล์ใน `~/Documents`
+   ไม่ได้ (`Operation not permitted`)
+   → `build_app.sh` คัดลอก source + icon เข้า `Contents/Resources/` (self-contained) เพราะ app
+   เข้าถึง resource ของตัวเองได้เสมอ. (`~/.claude` `~/.codex` `~/.gemini` อยู่ home ไม่โดน TCC)
+
+2. **ต้องใช้ framework / GUI python** — python ที่ไม่ใช่ framework build (เช่น anaconda `bin/python3`)
+   ต่อ WindowServer ไม่ได้ → NSStatusItem ไม่โผล่
+   → `build_app.sh` ตรวจหา framework python (`python.app/.../python`) อัตโนมัติ
+
+3. **launcher ต้อง _detach_ python ไม่ใช่ `exec`** — ถ้า `exec python` ผ่าน LaunchServices ตัว process
+   จะค้างใน "app slot" ของ bundle → มี Dock icon แต่ menu-bar icon ไม่โผล่
+   → ใช้ `nohup … & disown` ให้ python register ใหม่เป็น GUI app สดๆ เหมือน launch จาก terminal
+
+4. **ซ่อน Dock icon** — detached python register เป็นตัวมันเอง LSUIElement ใน plist คุมไม่ถึง
+   → ตั้ง `NSApplication.setActivationPolicy_(1)` (Accessory) ในโค้ด
+
+> styling helper ทุกตัว (gradient bar / attributed text / SF Symbols) ห่อ try/except
+> ถ้า AppKit/PIL ล้มจะ fallback เป็น text ธรรมดาแทน crash
+
 ## Requirements
 
 - macOS 11+ (Apple Silicon หรือ Intel)

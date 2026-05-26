@@ -74,8 +74,8 @@ detached python register เป็น `python.app` เอง LSUIElement ใน 
 
 - **ChatGPT desktop app — อ่านไม่ได้** (`~/Library/Application Support/com.openai.chat/.../*.data` เข้ารหัส)
   ทำได้แค่ทำนับจำนวน conversation; token จริงต้องดูที่ platform.openai.com/usage
-- **Limit เป็นค่าประมาณ** (Claude session 40M / weekly 200M / sonnet 100M, Codex weekly 2M, Gemini 1000/day)
-  ผู้ใช้ปรับเองได้ใน `~/.config/token_spendie/config.json`
+- **Limit เป็นค่า calibrated** (Claude session 18M / weekly 7.5M / sonnet 4M, Codex weekly 2M, Gemini 1000/day)
+  — fresh tokens, ปรับเองได้ใน `~/.config/token_spendie/config.json` (ดูหมวดความแม่นยำด้านบน)
 - **Auto-start ทดสอบแบบ kickstart เท่านั้น** ยังไม่ได้ทดสอบ login จริง
 
 ---
@@ -88,7 +88,7 @@ detached python register เป็น `python.app` เอง LSUIElement ใน 
 | `build_app.sh` | สร้าง `Token Spendie.app` (เลือก framework python, ฝังไฟล์, detached launcher) |
 | `make_icons.py` | สร้าง `menubar_icon.png` + `AppIcon.icns` (PIL) |
 | `run.sh` | รันแบบ dev (ไม่ผ่าน bundle) |
-| `requirements.txt` | `rumps` |
+| `requirements.txt` | `rumps`, `Pillow` |
 
 ## คำสั่ง
 
