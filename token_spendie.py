@@ -982,8 +982,9 @@ class TokenSpendieApp(rumps.App):
         dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
         if relative:
             return humanize_delta((dt - now).total_seconds())
-        # Include time-of-day so it visibly matches Claude's "Resets Tue 8:00 PM".
-        return dt.astimezone().strftime("%a %b %-d, %-I%p")
+        # Match Claude's own wording verbatim ("Resets Tue 8:00 PM"). The weekly
+        # reset is always within 7 days, so the weekday alone is unambiguous.
+        return dt.astimezone().strftime("%a %-I:%M %p")
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────────────
