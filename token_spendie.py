@@ -982,7 +982,8 @@ class TokenSpendieApp(rumps.App):
         dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
         if relative:
             return humanize_delta((dt - now).total_seconds())
-        return dt.astimezone().strftime("%a, %b %-d")
+        # Include time-of-day so it visibly matches Claude's "Resets Tue 8:00 PM".
+        return dt.astimezone().strftime("%a %b %-d, %-I%p")
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────────────
