@@ -59,16 +59,27 @@ detached python register เป็น `python.app` เอง LSUIElement ใน 
 
 ## 📊 ความแม่นยำของตัวเลข (สำคัญ)
 
-- **ตัวเลขจริงอยู่บนเซิร์ฟเวอร์เท่านั้น** — Claude `/status` ดึงสด (reset time เป็น server-side)
-  ไม่มีไฟล์ local ที่เก็บ % จริง widget จึงเป็น **การประมาณจาก log**
-- **cache_read ทำให้ยอดพอง ~97%** → แก้แล้วโดย**ตัด cache_read ออก** นับเฉพาะ fresh tokens
-  (`input + output + cache_creation`) ฝั่ง Codex ก็ตัด cached (`total - cached_input`)
-- **Limit ถูก calibrate กับ /status** (2026-05-26: session 7%, week 52%):
-  - session 18M, weekly 7.5M, sonnet 4M, codex 2M (fresh tokens)
-  - หลัง calibrate widget แสดง Session 7% / Weekly 52% ตรงกับ /status
-  - **วิธี calibrate ใหม่**: อ่าน /status → `limit = ยอดที่ widget นับได้ / (% จาก /status)`
-- ⚠️ ค่า limit session vs weekly อาจไม่ consistent เชิงฟิสิกส์ (session window 5h-rolling
-  ไม่ตรงกับ reset จริงที่ "เที่ยงคืน Bangkok") — เป็น calibration constant ไม่ใช่ limit จริง
+### Claude = LIVE API (วิธีสุดท้าย ✅ แม่นจริง)
+- log อย่างเดียวเลียน % ของ /status ไม่ได้ (เพราะ /status คิดจาก context size + weighting
+  server-side: fresh token เพิ่ม 23% แต่ official พุ่ง 5 เท่า → ไม่ proportional)
+- **ทางออก: ดึง `anthropic-ratelimit-unified-5h/7d-utilization` headers** = source เดียวกับ /status
+  - ยิง `POST /v1/messages` (haiku, max_tokens:1) อ่าน response headers — **count_tokens ไม่แนบ headers พวกนี้**
+  - auth: อ่าน OAuth token จาก Keychain `security find-generic-password -s "Claude Code-credentials"`
+    (field `claudeAiOauth.accessToken` + `expiresAt`)
+  - beta header ต้องมี: `anthropic-beta: oauth-2025-04-20`
+  - **ห้าม refresh token เอง** — refresh token หมุน single-use จะทำ Claude Code จริงหลุด login
+  - poll background thread ทุก `claude_api_poll_minutes` (default 5) → cache → สั่ง `_refresh_data()` ทันที
+    (สำคัญ: ถ้าไม่สั่ง re-render UI จะค้างจอ loading จนถึงรอบ refresh ถัดไป)
+  - token หมด/อ่านไม่ได้ → fallback log cost
+- **bundle context อ่าน Keychain ได้** (ทดสอบแล้ว ไม่เด้ง prompt — binary เดิม)
+
+### Fallback: cost จาก log
+- pricing calibrate ตรง /usage (`CLAUDE_PRICING`): sonnet standard, opus cache_read=$0.20/M
+  (back out จาก $22.26 ตัวอย่าง /usage) → รวม $23.98 vs จริง $23.95
+- token ที่แสดง = total throughput (รวม cache); cost = weighted ตาม pricing
+
+### Codex / Gemini
+- ยังเป็น log estimate (Codex fresh tokens = `total - cached_input`, Gemini นับ requests)
 
 ## ⏳ ค้าง / ยังไม่เสร็จ
 

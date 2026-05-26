@@ -34,7 +34,11 @@ DEFAULT_CONFIG = {
     "claude_weekly_sonnet_limit":  4_000_000,   # fresh tokens per week (Sonnet only)
     "codex_weekly_limit":          2_000_000,   # fresh tokens per week
     "gemini_daily_limit":              1_000,   # requests per day
-    "refresh_interval_minutes":            1,   # how often to refresh
+    "refresh_interval_minutes":            1,   # how often to refresh the UI
+    # Claude live limits: poll the API for the real unified rate-limit % that
+    # /status shows (reads the OAuth token from Keychain; tiny cost per poll).
+    "claude_use_api":                   True,
+    "claude_api_poll_minutes":             5,   # how often to hit the API
 }
 
 # Selectable refresh intervals shown in the submenu (minutes)
@@ -88,6 +92,14 @@ def fmt_tokens(n: int) -> str:
     return str(n)
 
 
+def fmt_cost(usd: float) -> str:
+    if usd >= 100:
+        return f"${usd:.0f}"
+    if usd >= 1:
+        return f"${usd:.2f}"
+    return f"${usd:.3f}"
+
+
 def humanize_delta(seconds: float) -> str:
     if seconds <= 0:
         return "now"
@@ -129,6 +141,7 @@ BRAND = {
     "codex":  (126, 211, 159),
     "gemini": (122, 170, 255),
 }
+COST_RGB = (125, 207, 182)   # calm teal-green for $ values
 
 
 def _grad_rgb(t: float) -> tuple[int, int, int]:
@@ -272,15 +285,146 @@ def status_rgb(pct: float) -> tuple[int, int, int]:
     return (52, 211, 153)        # green
 
 
-# ── Claude usage ───────────────────────────────────────────────────────────────────
+# ── Claude live limits (official unified rate-limit headers) ─────────────────────────
+#
+# /status shows server-side limit %, which can't be derived from logs. The same
+# numbers come back as `anthropic-ratelimit-unified-*` headers on any API call.
+# We read the OAuth token Claude Code already stores in the Keychain and make a
+# tiny request to read those headers. We never refresh the token ourselves
+# (refresh tokens rotate single-use — doing so would log out the real Claude
+# Code); if it's expired we just fall back to the log-based cost view.
 
-def get_claude_usage() -> tuple[int, int, int, datetime | None]:
-    """Returns (session_tokens, weekly_tokens, weekly_sonnet_tokens, oldest_session_ts)."""
+import urllib.error
+import urllib.request
+
+KEYCHAIN_SERVICE = "Claude Code-credentials"
+ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
+
+
+def _read_claude_token() -> tuple[str | None, int]:
+    """Return (access_token, expires_at_ms) from the Keychain, or (None, 0)."""
+    try:
+        out = subprocess.run(
+            ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-w"],
+            capture_output=True, text=True, timeout=5)
+        if out.returncode != 0 or not out.stdout.strip():
+            return None, 0
+        data = json.loads(out.stdout)
+        oauth = data.get("claudeAiOauth", data)
+        return oauth.get("accessToken"), int(oauth.get("expiresAt", 0) or 0)
+    except Exception:
+        return None, 0
+
+
+def get_claude_unified() -> dict:
+    """
+    Fetch the live unified rate-limit utilisation that /status shows.
+    Returns {ok, s_util, w_util, s_reset, w_reset} or {ok: False, reason}.
+    """
+    token, expires_ms = _read_claude_token()
+    if not token:
+        return {"ok": False, "reason": "no token — sign in to Claude Code"}
+    if expires_ms and expires_ms / 1000 < datetime.now(timezone.utc).timestamp():
+        return {"ok": False, "reason": "token expired — open Claude Code"}
+
+    body = json.dumps({
+        "model": "claude-haiku-4-5",
+        "max_tokens": 1,
+        "messages": [{"role": "user", "content": "."}],
+    }).encode()
+    req = urllib.request.Request(ANTHROPIC_MESSAGES_URL, data=body, headers={
+        "authorization": f"Bearer {token}",
+        "anthropic-version": "2023-06-01",
+        "anthropic-beta": "oauth-2025-04-20",
+        "content-type": "application/json",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            h = resp.headers
+
+            def _f(key):
+                v = h.get(key)
+                try:
+                    return float(v)
+                except (TypeError, ValueError):
+                    return None
+
+            def _i(key):
+                v = h.get(key)
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    return None
+
+            return {
+                "ok": True,
+                "s_util": _f("anthropic-ratelimit-unified-5h-utilization"),
+                "w_util": _f("anthropic-ratelimit-unified-7d-utilization"),
+                "s_reset": _i("anthropic-ratelimit-unified-5h-reset"),
+                "w_reset": _i("anthropic-ratelimit-unified-7d-reset"),
+            }
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return {"ok": False, "reason": "auth failed — open Claude Code"}
+        return {"ok": False, "reason": f"HTTP {e.code}"}
+    except Exception as e:
+        return {"ok": False, "reason": str(e)[:50]}
+
+
+# ── Claude usage & cost ──────────────────────────────────────────────────────────────
+#
+# We can't reproduce Claude's server-side limit % from local logs (it weighs
+# context size, not raw token count), so instead we report what logs DO measure
+# exactly: token volume + an estimated cost. Pricing (USD per 1M tokens) is
+# calibrated to reproduce Claude Code's own /usage "Usage by model" figures.
+
+CLAUDE_PRICING = {
+    "opus":   {"in": 15.0, "out": 75.0, "cache_write": 18.75, "cache_read": 0.20},
+    "sonnet": {"in":  3.0, "out": 15.0, "cache_write":  3.75, "cache_read": 0.30},
+    "haiku":  {"in":  1.0, "out":  5.0, "cache_write":  1.25, "cache_read": 0.10},
+}
+
+
+def _model_family(model: str) -> str:
+    m = model.lower()
+    if "opus" in m:
+        return "opus"
+    if "haiku" in m:
+        return "haiku"
+    return "sonnet"
+
+
+def _msg_cost(usage: dict, model: str) -> float:
+    p = CLAUDE_PRICING[_model_family(model)]
+    return (
+        usage.get("input_tokens", 0)               * p["in"]
+        + usage.get("output_tokens", 0)            * p["out"]
+        + usage.get("cache_creation_input_tokens", 0) * p["cache_write"]
+        + usage.get("cache_read_input_tokens", 0)  * p["cache_read"]
+    ) / 1_000_000
+
+
+class _Bucket:
+    __slots__ = ("tokens", "cost")
+    def __init__(self):
+        self.tokens = 0
+        self.cost = 0.0
+    def add(self, tok, cost):
+        self.tokens += tok
+        self.cost += cost
+
+
+def get_claude_usage() -> dict:
+    """
+    Returns dict with _Bucket values (tokens + cost) for:
+      'session' (5h), 'weekly' (7d), 'weekly_sonnet' (7d), and 'oldest_session' ts.
+    Token volume is total throughput (incl. cache); cost uses CLAUDE_PRICING.
+    """
     now = datetime.now(timezone.utc)
     session_start = now - timedelta(hours=SESSION_WINDOW_HOURS)
     week_start    = now - timedelta(days=7)
 
-    session_tokens = weekly_tokens = weekly_sonnet_tokens = 0
+    session, weekly, weekly_sonnet = _Bucket(), _Bucket(), _Bucket()
     oldest_in_session: datetime | None = None
 
     for jsonl_path in CLAUDE_PROJECTS_DIR.rglob("*.jsonl"):
@@ -294,7 +438,6 @@ def get_claude_usage() -> tuple[int, int, int, datetime | None]:
                         entry = json.loads(raw)
                     except json.JSONDecodeError:
                         continue
-
                     msg = entry.get("message") or {}
                     usage = msg.get("usage")
                     if not usage:
@@ -307,28 +450,32 @@ def get_claude_usage() -> tuple[int, int, int, datetime | None]:
                     except ValueError:
                         continue
 
-                    model = (msg.get("model") or "").lower()
-                    # Exclude cache_read: re-reading cached context is weighted
-                    # very low by Claude's real limits and otherwise dominates
-                    # the count (~97%), making %s wildly overstate /status.
-                    total = (
+                    model = msg.get("model") or ""
+                    tok = (
                         usage.get("input_tokens", 0)
                         + usage.get("output_tokens", 0)
                         + usage.get("cache_creation_input_tokens", 0)
+                        + usage.get("cache_read_input_tokens", 0)
                     )
+                    cost = _msg_cost(usage, model)
 
                     if ts >= session_start:
-                        session_tokens += total
+                        session.add(tok, cost)
                         if oldest_in_session is None or ts < oldest_in_session:
                             oldest_in_session = ts
                     if ts >= week_start:
-                        weekly_tokens += total
-                        if "sonnet" in model:
-                            weekly_sonnet_tokens += total
+                        weekly.add(tok, cost)
+                        if "sonnet" in model.lower():
+                            weekly_sonnet.add(tok, cost)
         except (IOError, PermissionError):
             continue
 
-    return session_tokens, weekly_tokens, weekly_sonnet_tokens, oldest_in_session
+    return {
+        "session": session,
+        "weekly": weekly,
+        "weekly_sonnet": weekly_sonnet,
+        "oldest_session": oldest_in_session,
+    }
 
 
 # ── Codex usage ────────────────────────────────────────────────────────────────────
@@ -504,6 +651,11 @@ class TokenSpendieApp(rumps.App):
         self._lock = threading.Lock()
         self._last_refresh: datetime | None = None
 
+        # Live Claude limits: cache filled by a background poll thread so the
+        # network call never blocks the menu.
+        self._claude_api: dict = {"ok": False, "reason": "loading…"}
+        self._claude_api_lock = threading.Lock()
+
         # Menu-bar-only: hide the Dock icon (accessory activation policy).
         try:
             from AppKit import NSApplication
@@ -513,7 +665,36 @@ class TokenSpendieApp(rumps.App):
 
         self._build_menu()
         self._start_timer()
+        self._start_claude_poll()
         self._refresh_data()
+
+    # ── Claude live-limits polling (background) ──────────────────────────────────
+
+    def _start_claude_poll(self):
+        t = threading.Thread(target=self._claude_poll_loop, daemon=True)
+        t.start()
+
+    def _claude_poll_loop(self):
+        import time as _time
+        while True:
+            if self.cfg.get("claude_use_api", True):
+                result = get_claude_unified()
+                with self._claude_api_lock:
+                    if result.get("ok"):
+                        self._claude_api = result          # fresh good data
+                    else:
+                        # keep last good utils if we had them; note the error
+                        prev = dict(self._claude_api)
+                        prev["ok_now"] = False
+                        prev["reason"] = result.get("reason")
+                        self._claude_api = prev if prev.get("s_util") is not None else result
+                # Push the freshly-polled numbers to the menu right away.
+                try:
+                    self._refresh_data()
+                except Exception:
+                    pass
+            mins = max(1, self.cfg.get("claude_api_poll_minutes", 5))
+            _time.sleep(mins * 60)
 
     # ── Menu construction ───────────────────────────────────────────────────────
 
@@ -690,18 +871,21 @@ class TokenSpendieApp(rumps.App):
         cfg = self.cfg
         now = datetime.now(timezone.utc)
 
-        # Claude
-        sess_t, week_t, week_sonnet_t, oldest_sess = get_claude_usage()
-        s_pct  = min(100.0, sess_t        / cfg["claude_session_5h_limit"]    * 100)
-        w_pct  = min(100.0, week_t        / cfg["claude_weekly_all_limit"]    * 100)
-        ws_pct = min(100.0, week_sonnet_t / cfg["claude_weekly_sonnet_limit"] * 100)
-
+        # Claude — prefer live unified rate-limit % (matches /status); else
+        # fall back to log-based cost + token volume.
+        cl = get_claude_usage()
+        cl_sess, cl_week, cl_wsonnet = cl["session"], cl["weekly"], cl["weekly_sonnet"]
+        oldest_sess = cl["oldest_session"]
         if oldest_sess:
             reset_at = oldest_sess + timedelta(hours=SESSION_WINDOW_HOURS)
             sess_reset = humanize_delta((reset_at - now).total_seconds())
         else:
             sess_reset = "~5h"
-        weekly_reset = next_weekday(1).strftime("Tue, %b %-d")  # Claude resets Tue
+        weekly_reset = next_weekday(1).strftime("Tue, %b %-d")
+
+        with self._claude_api_lock:
+            api = dict(self._claude_api)
+        use_api = self.cfg.get("claude_use_api", True) and api.get("s_util") is not None
 
         # Codex
         cx_sess_t, cx_week_t, cx_turns = get_codex_usage()
@@ -720,15 +904,37 @@ class TokenSpendieApp(rumps.App):
             size=11, alpha=0.45)
 
         # ── Claude rows ──
-        self._row(self._cl_s_t, self._cl_s_b, self._cl_s_sub,
-                  "Session", s_pct, f"{int(round(s_pct))}%",
-                  f"{fmt_tokens(sess_t)} · 5h window · resets in {sess_reset}")
-        self._row(self._cl_w_t, self._cl_w_b, self._cl_w_sub,
-                  "Weekly", w_pct, f"{int(round(w_pct))}%",
-                  f"{fmt_tokens(week_t)} · all models · resets {weekly_reset}")
-        self._row(self._cl_ws_t, self._cl_ws_b, self._cl_ws_sub,
-                  "Weekly · Sonnet", ws_pct, f"{int(round(ws_pct))}%",
-                  f"{fmt_tokens(week_sonnet_t)} · Sonnet only · resets {weekly_reset}")
+        if use_api:
+            # Live official limits: Session (5h) + Weekly (7d) as real %.
+            s_pct = (api["s_util"] or 0) * 100
+            w_pct = (api["w_util"] or 0) * 100
+            s_rst = self._fmt_reset_ts(api.get("s_reset"), now, relative=True)
+            w_rst = self._fmt_reset_ts(api.get("w_reset"), now, relative=False)
+            stale = " · stale" if api.get("ok_now") is False else ""
+            self._show_row(self._cl_s_t, self._cl_s_b, self._cl_s_sub, True,
+                           "Session", s_pct, f"{int(round(s_pct))}%",
+                           f"official · 5h · resets in {s_rst}{stale}")
+            self._show_row(self._cl_w_t, self._cl_w_b, self._cl_w_sub, True,
+                           "Weekly", w_pct, f"{int(round(w_pct))}%",
+                           f"official · all models · resets {w_rst}{stale}")
+            # 3rd row: weekly spend estimate from logs as a bonus $ figure
+            self._cost_row(self._cl_ws_t, self._cl_ws_b, self._cl_ws_sub,
+                           "Spend · 7d", cl_week.cost,
+                           f"≈ list-price est · {fmt_tokens(cl_week.tokens)} tokens")
+        else:
+            # Fallback: cost + token volume from logs.
+            hint = ""
+            if self.cfg.get("claude_use_api", True):
+                hint = f" · {api.get('reason', 'log mode')}"
+            self._cost_row(self._cl_s_t, self._cl_s_b, self._cl_s_sub,
+                           "Session", cl_sess.cost,
+                           f"{fmt_tokens(cl_sess.tokens)} tokens · 5h{hint}")
+            self._cost_row(self._cl_w_t, self._cl_w_b, self._cl_w_sub,
+                           "Weekly", cl_week.cost,
+                           f"{fmt_tokens(cl_week.tokens)} tokens · resets {weekly_reset}")
+            self._cost_row(self._cl_ws_t, self._cl_ws_b, self._cl_ws_sub,
+                           "Weekly · Sonnet", cl_wsonnet.cost,
+                           f"{fmt_tokens(cl_wsonnet.tokens)} · Sonnet only")
 
         # ── Codex rows ── (session shown as raw volume, no fixed limit)
         cx_s_pct = min(100.0, cx_sess_t / max(cx_week_t, 1) * 100) if cx_week_t else 0.0
@@ -750,6 +956,33 @@ class TokenSpendieApp(rumps.App):
         _set_bar(b_item, pct)
         if sub_item is not None:
             _set_attr_title(sub_item, f"    {sub}", size=11, alpha=0.5)
+
+    def _cost_row(self, t_item, b_item, sub_item, label, cost, sub):
+        """Cost headline + token/reset subline; no progress bar (hidden)."""
+        _set_metric_title(t_item, label, fmt_cost(cost), COST_RGB)
+        try:
+            b_item._menuitem.setHidden_(True)
+        except Exception:
+            b_item.title = ""
+        _set_attr_title(sub_item, f"    {sub}", size=11, alpha=0.5)
+
+    def _show_row(self, t_item, b_item, sub_item, with_bar, label, pct, value, sub):
+        """Metric row with a gradient bar (un-hides the bar if it was hidden)."""
+        try:
+            b_item._menuitem.setHidden_(False)
+        except Exception:
+            pass
+        self._row(t_item, b_item, sub_item, label, pct, value, sub)
+
+    @staticmethod
+    def _fmt_reset_ts(ts, now, relative: bool) -> str:
+        """Format a unix reset timestamp either as a countdown or a date."""
+        if not ts:
+            return "—"
+        dt = datetime.fromtimestamp(int(ts), tz=timezone.utc)
+        if relative:
+            return humanize_delta((dt - now).total_seconds())
+        return dt.astimezone().strftime("%a, %b %-d")
 
 
 # ── Entry point ──────────────────────────────────────────────────────────────────────

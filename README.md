@@ -11,7 +11,8 @@ macOS menu-bar widget ที่ monitor การใช้ **token** ของ *
 
 ## Features
 
-- **Claude** — Session (5h) / Weekly (all models) / Weekly · Sonnet — จาก `~/.claude/projects/**/*.jsonl`
+- **Claude** — **% จริงจาก `/status`** (Session 5h + Weekly 7d) ดึงสดจาก official `anthropic-ratelimit-unified-*` headers + แสดง spend estimate จาก log
+  - ถ้า token หมดอายุ → fallback เป็น cost+token จาก `~/.claude/projects/**/*.jsonl` อัตโนมัติ
 - **Codex** — Session (5h) / Weekly + จำนวน turns — จาก `~/.codex/log/codex-tui.log`
 - **Gemini** — Daily requests — จาก `~/.gemini/tmp/gemini-cli/`
 - **UI โมเดิร์น** — progress bar ไล่สี (เขียว→เหลือง→แดง) โค้งมน, ตัวเลข % สีตามสถานะ,
@@ -49,11 +50,14 @@ open "Token Spendie.app"
 
 ## ความแม่นยำของตัวเลข
 
-- **ตัวเลขจริงอยู่บนเซิร์ฟเวอร์เท่านั้น** — Claude `/status` ดึงสด widget เป็นการ **ประมาณจาก log ในเครื่อง**
-  (ไม่รวม device อื่น หรือ claude.ai)
-- **นับเฉพาะ fresh tokens** — ตัด cache read ออก (ไม่งั้น cache read จะกินยอด ~97% ทำให้ % พองเกินจริง)
-- **Limit ถูก calibrate กับ /status** (session 7% / week 52% ณ 2026-05-26)
-  - อยาก calibrate ใหม่: อ่าน `/status` → ตั้ง `limit = ยอดที่ widget นับได้ ÷ (% จาก /status)` ในเมนู Edit limits
+- **Claude = ตัวเลขจริง (live API)** — ดึง `anthropic-ratelimit-unified-5h/7d-utilization` ซึ่งเป็น
+  source เดียวกับ `/status` → ตรงเป๊ะ
+  - ใช้ OAuth token ที่ Claude Code เก็บใน **Keychain** (อ่านอย่างเดียว ไม่ refresh เอง เพื่อไม่ให้
+    Claude Code ของจริงหลุด login) — poll ทุก 5 นาที (ปรับได้), call จิ๋ว ~$0.01/วัน
+  - token หมดอายุ → fallback เป็น **cost estimate จาก log** (pricing calibrate กับ /usage:
+    sonnet ตรง, opus cache-read ปรับให้ตรง $) → เปิด Claude Code ครั้งเดียว token จะ fresh
+  - ปิด live API ได้ใน config (`claude_use_api: false`) ถ้าไม่อยากให้ยิง API
+- **Codex / Gemini** — ประมาณจาก log ในเครื่อง (Codex นับ fresh tokens, Gemini นับ requests)
 - **ChatGPT desktop app อ่านไม่ได้** — เข้ารหัส local storage ทั้งหมด ดู token จริงที่ platform.openai.com/usage
 
 ## โครงสร้างไฟล์
